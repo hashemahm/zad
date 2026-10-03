@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Tech Microlearning</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">⚡ <span>Microlearning</span></div>
+    <nav class="tabs" role="tablist">
+      <button class="tab active" data-view="feed">Feed</button>
+      <button class="tab" data-view="topics">Topics</button>
+      <button class="tab" data-view="library">Library</button>
+      <button class="tab" data-view="history">History</button>
+      <button class="tab" data-view="settings">Settings</button>
+    </nav>
+  </header>
+
+  <main>
+    <!-- Feed -->
+    <section id="view-feed" class="view active">
+      <div class="toolbar">
+        <div class="chips" id="feed-type">
+          <button class="chip active" data-type="">All</button>
+          <button class="chip" data-type="video">▶ Videos</button>
+          <button class="chip" data-type="reading">📖 Reading</button>
+        </div>
+        <span class="muted" id="feed-limits"></span>
+        <button class="btn" id="feed-shuffle">↻ New mix</button>
+      </div>
+      <div id="feed-grid" class="grid"></div>
+    </section>
+
+    <!-- Topics -->
+    <section id="view-topics" class="view">
+      <form id="topic-form" class="panel row-form">
+        <input id="topic-name" placeholder="Add a topic, e.g. Kubernetes" maxlength="120" required>
+        <select id="topic-priority" aria-label="Priority"></select>
+        <button class="btn primary" type="submit">Add topic</button>
+      </form>
+      <p class="muted small">Priority sets each topic's share of your feed. P1 = most important, P5 = least.</p>
+      <div id="topic-list" class="topic-list"></div>
+      <div class="panel">
+        <div class="panel-head">
+          <h3>Sources</h3>
+          <button class="btn" id="crawl-all">↻ Re-crawl all topics</button>
+        </div>
+        <ul id="source-list" class="source-list"></ul>
+      </div>
+    </section>
+
+    <!-- Library -->
+    <section id="view-library" class="view">
+      <div class="toolbar wrap">
+        <input id="lib-q" type="search" placeholder="Search saved content…">
+        <select id="lib-topic"><option value="">All topics</option></select>
+        <select id="lib-type">
+          <option value="">All types</option>
+          <option value="video">Videos</option>
+          <option value="reading">Reading</option>
+        </select>
+        <select id="lib-status">
+          <option value="all">Everything</option>
+          <option value="unseen">Unseen</option>
+          <option value="viewed">Viewed</option>
+          <option value="bookmarked">Saved</option>
+          <option value="completed">Done</option>
+          <option value="dismissed">Hidden</option>
+        </select>
+        <span class="muted" id="lib-count"></span>
+      </div>
+      <div id="lib-grid" class="grid"></div>
+      <div class="center"><button class="btn" id="lib-more" hidden>Load more</button></div>
+    </section>
+
+    <!-- History -->
+    <section id="view-history" class="view">
+      <div id="history-list" class="history"></div>
+    </section>
+
+    <!-- Settings -->
+    <section id="view-settings" class="view">
+      <form id="prefs-form" class="panel settings">
+        <h3>Session length</h3>
+        <label class="field">
+          <span>Max video length <b id="v-out"></b></span>
+          <input type="range" id="max-video" min="1" max="60" step="1">
+        </label>
+        <label class="field">
+          <span>Max reading time <b id="r-out"></b></span>
+          <input type="range" id="max-reading" min="1" max="60" step="1">
+        </label>
+        <h3>Content</h3>
+        <label class="check"><input type="checkbox" id="inc-video"> Include videos</label>
+        <label class="check"><input type="checkbox" id="inc-reading"> Include reading</label>
+        <label class="check"><input type="checkbox" id="inc-unknown"> Include items with unknown length</label>
+        <p class="muted small">New limits apply to the feed right away. Re-crawl to find more content that fits a longer limit.</p>
+        <button class="btn primary" type="submit">Save settings</button>
+      </form>
+    </section>
+  </main>
+
+  <!-- Player / reader -->
+  <dialog id="player">
+    <div class="player-head">
+      <div>
+        <div class="meta" id="player-meta"></div>
+        <h2 id="player-title"></h2>
+      </div>
+      <button class="icon-btn" id="player-close" aria-label="Close">✕</button>
+    </div>
+    <div id="player-body" class="player-body"></div>
+    <div class="player-actions">
+      <a class="btn" id="player-open" target="_blank" rel="noopener noreferrer">Open original ↗</a>
+      <span class="spacer"></span>
+      <button class="btn" id="player-save">☆ Save</button>
+      <button class="btn primary" id="player-done">✓ Mark done</button>
+    </div>
+  </dialog>
+
+  <div id="toast" class="toast" role="status"></div>
+  <script src="/static/app.js"></script>
+</body>
+</html>

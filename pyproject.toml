@@ -1,0 +1,22 @@
+[project]
+name = "tech-microlearning"
+version = "0.1.0"
+description = "Microlearning feed that crawls YouTube and social media for short videos and readings on your topics"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "sqlalchemy>=2.0.36",
+    "pydantic-settings>=2.6",
+    "httpx>=0.27",
+    "nh3>=0.2.18",
+]
+
+[dependency-groups]
+dev = ["pytest>=8.3"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.uv]
+package = false

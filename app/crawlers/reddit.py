@@ -1,3 +1,4 @@
+import re
 import time
 from datetime import UTC, datetime
 from html import unescape
@@ -6,12 +7,16 @@ import httpx
 
 from app.config import Settings
 from app.crawlers.base import (
+    ChannelRef,
     CrawlContext,
     CrawledItem,
     SourceUnavailable,
     count_words,
+    bare_host,
     is_youtube_url,
     matches_query,
+    parse_url,
+    path_segments,
     reading_seconds,
     sanitize_html,
     truncate,
@@ -20,6 +25,13 @@ from app.models import READING
 
 TOKEN_URL = "https://www.reddit.com/api/v1/access_token"
 SEARCH_URL = "https://oauth.reddit.com/search"
+SUBREDDIT_SEARCH_URL = "https://oauth.reddit.com/r/{subreddit}/search"
+_SUBREDDIT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_]{1,20}$")
+_STORED_AUTHOR_RE = re.compile(r" in r/([A-Za-z0-9_]+)$")
+
+
+def subreddit_ref(name: str) -> ChannelRef:
+    return ChannelRef(key=name.lower(), name=f"r/{name}", url=f"https://www.reddit.com/r/{name}")
 
 
 class RedditCrawler:
@@ -57,12 +69,22 @@ class RedditCrawler:
         return self._token
 
     async def search(self, client: httpx.AsyncClient, query: str, ctx: CrawlContext) -> list[CrawledItem]:
+        return await self._search(client, SEARCH_URL, query, ctx, {})
+
+    async def search_channel(self, client: httpx.AsyncClient, channel: ChannelRef, query: str,
+                             ctx: CrawlContext) -> list[CrawledItem]:
+        url = SUBREDDIT_SEARCH_URL.format(subreddit=channel.key)
+        # A subreddit has far fewer posts than all of Reddit, so look back further.
+        return await self._search(client, url, query, ctx, {"restrict_sr": 1, "t": "all"})
+
+    async def _search(self, client: httpx.AsyncClient, url: str, query: str, ctx: CrawlContext,
+                      extra: dict) -> list[CrawledItem]:
         ready, reason = self.is_configured()
         if not ready:
             raise SourceUnavailable(reason)
         token = await self._get_token(client)
         response = await client.get(
-            SEARCH_URL,
+            url,
             params={
                 "q": query,
                 "sort": "relevance",
@@ -70,11 +92,29 @@ class RedditCrawler:
                 "type": "link",
                 "limit": min(100, ctx.limit * 3),
                 "raw_json": 1,
+                **extra,
             },
             headers={"Authorization": f"Bearer {token}", "User-Agent": self.user_agent},
         )
         response.raise_for_status()
         return self.parse(response.json(), ctx, query)
+
+    async def resolve_channel(self, client: httpx.AsyncClient, text: str) -> ChannelRef:
+        """Accept r/name, /r/name, a subreddit URL or a bare subreddit name."""
+        text = text.strip().strip("/")
+        name = text[2:] if text.lower().startswith("r/") else text
+        if not _SUBREDDIT_RE.match(name):
+            url = parse_url(text)
+            parts = path_segments(url) if url and (bare_host(url) or "").endswith("reddit.com") else []
+            name = parts[1] if len(parts) >= 2 and parts[0].lower() == "r" else ""
+        if not _SUBREDDIT_RE.match(name):
+            raise ValueError("Use a subreddit like r/kubernetes")
+        return subreddit_ref(name)
+
+    @staticmethod
+    def channel_from_stored(url: str, author: str | None) -> ChannelRef | None:
+        match = _STORED_AUTHOR_RE.search(author or "")
+        return subreddit_ref(match.group(1)) if match else None
 
     def parse(self, payload: dict, ctx: CrawlContext, query: str = "") -> list[CrawledItem]:
         items: list[CrawledItem] = []
@@ -117,6 +157,7 @@ class RedditCrawler:
                     duration_seconds=duration,
                     published_at=datetime.fromtimestamp(post["created_utc"], UTC) if post.get("created_utc") else None,
                     popularity=int(post.get("score", 0)),
+                    channel=subreddit_ref(post["subreddit"]) if post.get("subreddit") else None,
                 )
             )
             if len(items) >= ctx.limit:

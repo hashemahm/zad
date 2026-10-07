@@ -16,6 +16,7 @@ def _as_utc(value: datetime | None) -> str | None:
 UtcDatetime = Annotated[datetime, PlainSerializer(_as_utc, return_type=str | None)]
 Priority = Annotated[int, Field(ge=1, le=5, description="1 = P1 (highest) .. 5 = P5 (lowest)")]
 ContentType = Literal["video", "reading"]
+ChannelStatus = Literal["neutral", "preferred", "blocked"]
 
 
 def _normalize_name(value: str) -> str:
@@ -69,6 +70,9 @@ class ContentOut(BaseModel):
     topic_name: str
     topic_priority: int
     source: str
+    channel_id: int | None
+    channel_name: str | None
+    channel_status: str | None
     content_type: str
     external_id: str
     url: str
@@ -117,6 +121,35 @@ class PreferencesIO(BaseModel):
     include_videos: bool
     include_reading: bool
     include_unknown_length: bool
+
+
+class ChannelOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    platform: str
+    key: str
+    name: str
+    url: str | None
+    status: ChannelStatus
+    manual: bool
+    item_count: int = 0
+    created_at: UtcDatetime
+
+
+class ChannelPage(BaseModel):
+    total: int
+    items: list[ChannelOut]
+
+
+class ChannelCreate(BaseModel):
+    value: str = Field(min_length=1, max_length=500, description="A URL, @handle, r/name or domain")
+    platform: str | None = Field(default=None, description="Detected from the value when omitted")
+    status: ChannelStatus = "preferred"
+
+
+class ChannelUpdate(BaseModel):
+    status: ChannelStatus
 
 
 class SourceStatus(BaseModel):

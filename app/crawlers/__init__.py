@@ -6,6 +6,7 @@ from app.crawlers.devto import DevToCrawler
 from app.crawlers.hackernews import HackerNewsCrawler
 from app.crawlers.medium import MediumCrawler
 from app.crawlers.reddit import RedditCrawler
+from app.crawlers.substack import SubstackCrawler
 from app.crawlers.youtube import YouTubeCrawler
 
 CRAWLER_CLASSES = {
@@ -14,6 +15,7 @@ CRAWLER_CLASSES = {
     "hackernews": HackerNewsCrawler,
     "devto": DevToCrawler,
     "medium": MediumCrawler,
+    "substack": SubstackCrawler,
 }
 
 

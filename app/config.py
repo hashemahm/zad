@@ -8,7 +8,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-ALL_SOURCES = ("youtube", "reddit", "hackernews", "devto", "medium")
+ALL_SOURCES = ("youtube", "reddit", "hackernews", "devto", "medium", "substack")
 
 
 class Settings(BaseSettings):
@@ -36,7 +36,12 @@ class Settings(BaseSettings):
 
     hackernews_min_points: int = 20
 
+    substack_include_paid: bool = False
+    substack_max_pages: int = 3
+
     crawl_results_per_source: int = 15
+    # Results fetched from each preferred source per topic crawl; 0 = only boost them in the feed.
+    preferred_source_results: int = 5
     crawl_interval_minutes: int = 360
     crawl_on_startup: bool = False
     http_timeout_seconds: float = 15.0

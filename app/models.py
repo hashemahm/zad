@@ -17,6 +17,12 @@ from app.db import Base
 VIDEO = "video"
 READING = "reading"
 
+# Channel.status values
+NEUTRAL = "neutral"
+PREFERRED = "preferred"  # boosted in the feed and crawled directly for every topic
+BLOCKED = "blocked"  # never stored, never shown
+CHANNEL_STATUSES = (NEUTRAL, PREFERRED, BLOCKED)
+
 
 def utcnow() -> datetime:
     return datetime.now(UTC)
@@ -39,6 +45,26 @@ class Topic(Base):
     )
 
 
+class Channel(Base):
+    """Who published an item within a platform: a YouTube channel, subreddit, Substack
+    publication, DEV/Medium author or publication, or (for Hacker News) the linked site."""
+
+    __tablename__ = "channels"
+    __table_args__ = (UniqueConstraint("platform", "key", name="uq_platform_key"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    platform: Mapped[str] = mapped_column(String(32), index=True)  # a crawler name, e.g. "youtube"
+    key: Mapped[str] = mapped_column(String(255))
+    name: Mapped[str] = mapped_column(String(255))
+    url: Mapped[str | None] = mapped_column(String(2048))
+    status: Mapped[str] = mapped_column(String(16), default=NEUTRAL, index=True)
+    # Added by the user rather than discovered by a crawl.
+    manual: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    items: Mapped[list["ContentItem"]] = relationship(back_populates="channel", passive_deletes=True)
+
+
 class ContentItem(Base):
     """A video or reading discovered by a crawler. Kept so it can be replayed later."""
 
@@ -48,6 +74,9 @@ class ContentItem(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     topic_id: Mapped[int] = mapped_column(ForeignKey("topics.id", ondelete="CASCADE"), index=True)
     source: Mapped[str] = mapped_column(String(32), index=True)
+    channel_id: Mapped[int | None] = mapped_column(
+        ForeignKey("channels.id", ondelete="SET NULL"), index=True
+    )
     content_type: Mapped[str] = mapped_column(String(16), index=True)
     external_id: Mapped[str] = mapped_column(String(255))
     url: Mapped[str] = mapped_column(String(2048))
@@ -73,6 +102,7 @@ class ContentItem(Base):
     dismissed: Mapped[bool] = mapped_column(Boolean, default=False)
 
     topic: Mapped[Topic] = relationship(back_populates="items")
+    channel: Mapped[Channel | None] = relationship(back_populates="items")
     views: Mapped[list["ViewEvent"]] = relationship(
         back_populates="item", cascade="all, delete-orphan", passive_deletes=True
     )

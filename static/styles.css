@@ -143,6 +143,27 @@ input:focus-visible, select:focus-visible, button:focus-visible { outline: 2px s
 .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; flex: none; }
 .dot.ok { background: var(--p4); } .dot.off { background: var(--danger); }
 
+/* sources */
+#ch-q { flex: 1; min-width: 200px; }
+.channel-list { display: flex; flex-direction: column; gap: 8px; }
+.channel {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 10px 14px;
+}
+.channel.blocked { opacity: .6; }
+.channel-info { flex: 1; min-width: 200px; }
+.channel-name { font-weight: 600; color: var(--text); text-decoration: none; }
+.channel-name:hover { color: var(--accent); }
+.platform { font-size: 11px; font-weight: 600; border-radius: 5px; padding: 1px 6px; background: var(--surface-2); color: var(--muted); }
+.link-btn { border: 0; background: none; padding: 0; color: var(--accent); cursor: pointer; font-size: inherit; }
+.segmented { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+.segmented button { border: 0; background: var(--surface); padding: 6px 10px; cursor: pointer; font-size: 13px; color: var(--muted); }
+.segmented button + button { border-left: 1px solid var(--border); }
+.segmented button.on { background: var(--surface-2); color: var(--text); font-weight: 600; }
+.segmented button.on.preferred { color: var(--accent); }
+.segmented button.on.blocked { color: var(--danger); }
+.star { color: var(--accent); }
+
 /* history */
 .history { display: flex; flex-direction: column; gap: 8px; }
 .history-row {

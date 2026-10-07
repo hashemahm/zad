@@ -1,8 +1,8 @@
 "use strict";
 
 const $ = (sel) => document.querySelector(sel);
-const SOURCE_LABELS = { youtube: "YouTube", reddit: "Reddit", hackernews: "Hacker News", devto: "DEV", medium: "Medium" };
-const state = { feedType: "", libOffset: 0, topics: [], current: null };
+const SOURCE_LABELS = { youtube: "YouTube", reddit: "Reddit", hackernews: "Hacker News", devto: "DEV", medium: "Medium", substack: "Substack" };
+const state = { feedType: "", libOffset: 0, libChannel: null, chOffset: 0, chStatus: "", topics: [], current: null };
 
 // --- utilities ---------------------------------------------------------------
 
@@ -103,7 +103,8 @@ function card(item, onChange) {
       h("div", { class: "meta" }, prio(item.topic_priority), metaLine(item.topic_name, SOURCE_LABELS[item.source] || item.source)),
       h("h3", { class: "card-title", onclick: () => openItem(item, onChange) }, item.title),
       item.description && h("p", { class: "desc" }, item.description),
-      metaLine(item.author, item.published_at && timeAgo(item.published_at),
+      metaLine(item.channel_status === "preferred" && h("span", { class: "star", title: "Preferred source" }, "★"),
+        item.author || item.channel_name, item.published_at && timeAgo(item.published_at),
         item.view_count ? `viewed ${item.view_count}×` : null)),
     h("div", { class: "card-actions" },
       h("button", { class: `icon-btn${item.completed ? " on" : ""}`, title: "Mark done", onclick: () => toggle("completed", "Marked done ✓") }, "✓ Done"),
@@ -164,6 +165,21 @@ function syncPlayerButtons() {
   const { item } = state.current;
   $("#player-save").textContent = item.bookmarked ? "★ Saved" : "☆ Save";
   $("#player-done").textContent = item.completed ? "↺ Not done" : "✓ Mark done";
+  const preferred = item.channel_status === "preferred";
+  $("#player-prefer").hidden = $("#player-block").hidden = !item.channel_id;
+  $("#player-prefer").textContent = preferred ? "★ Preferred source" : "☆ Prefer source";
+  $("#player-prefer").title = item.channel_name ? `${preferred ? "Stop preferring" : "Show more from"} ${item.channel_name}` : "";
+  $("#player-block").title = item.channel_name ? `Never show ${item.channel_name} again` : "";
+}
+
+async function setChannelStatus(channelId, status) {
+  return api(`/api/channels/${channelId}`, { method: "PATCH", body: { status } });
+}
+
+/** Reload whatever view is showing, e.g. after blocking a source removes many items at once. */
+function refreshView() {
+  const view = document.querySelector(".tab.active")?.dataset.view;
+  if (view) loaders[view]().catch((err) => toast(`Could not load: ${err.message}`));
 }
 
 async function playerToggle(field) {
@@ -179,6 +195,26 @@ async function playerToggle(field) {
 $("#player-close").onclick = () => $("#player").close();
 $("#player-save").onclick = () => playerToggle("bookmarked");
 $("#player-done").onclick = () => playerToggle("completed");
+$("#player-prefer").onclick = async () => {
+  const { item, onChange } = state.current;
+  try {
+    const channel = await setChannelStatus(item.channel_id, item.channel_status === "preferred" ? "neutral" : "preferred");
+    item.channel_status = channel.status;
+    syncPlayerButtons();
+    onChange?.(item, "channel");
+    toast(channel.status === "preferred" ? `★ You'll see more from ${channel.name}` : `${channel.name} is no longer preferred`);
+  } catch (err) { toast(err.message); }
+};
+$("#player-block").onclick = async () => {
+  const { item } = state.current;
+  if (!confirm(`Block ${item.channel_name}? Its content will no longer be crawled or shown.`)) return;
+  try {
+    const channel = await setChannelStatus(item.channel_id, "blocked");
+    $("#player").close();
+    toast(`⛔ Blocked ${channel.name}`);
+    refreshView();
+  } catch (err) { toast(err.message); }
+};
 $("#player").addEventListener("close", () => $("#player-body").replaceChildren()); // stops video playback
 $("#player").addEventListener("click", (e) => { if (e.target.id === "player") e.target.close(); });
 
@@ -235,7 +271,8 @@ $("#topic-priority").replaceChildren(...priorityOptions(1));
 
 function crawlSummary(topic) {
   if (!topic.last_crawled_at) return "Not crawled yet";
-  const failed = (topic.last_crawl_summary?.sources || []).filter((s) => s.error).map((s) => SOURCE_LABELS[s.source]);
+  const failed = (topic.last_crawl_summary?.sources || []).filter((s) => s.error)
+    .map((s) => s.channel ? `${s.channel} (${SOURCE_LABELS[s.source]})` : SOURCE_LABELS[s.source]);
   return `Crawled ${timeAgo(topic.last_crawled_at)}${failed.length ? ` · failed: ${failed.join(", ")}` : ""}`;
 }
 
@@ -313,6 +350,94 @@ $("#crawl-all").onclick = async () => {
   toast("Re-crawling all active topics in the background…");
 };
 
+// --- sources (channels) -------------------------------------------------------
+
+const platformOptions = (first) => [h("option", { value: "" }, first),
+  ...Object.entries(SOURCE_LABELS).map(([v, label]) => h("option", { value: v }, label))];
+$("#channel-platform").replaceChildren(...platformOptions("Detect platform"));
+$("#ch-platform").replaceChildren(...platformOptions("All platforms"));
+
+const CHANNEL_STATUSES = [["preferred", "★ Prefer"], ["neutral", "Neutral"], ["blocked", "⛔ Block"]];
+
+async function loadChannels(append = false) {
+  if (!append) state.chOffset = 0;
+  const params = new URLSearchParams({ limit: 50, offset: state.chOffset });
+  if ($("#ch-q").value.trim()) params.set("q", $("#ch-q").value.trim());
+  if ($("#ch-platform").value) params.set("platform", $("#ch-platform").value);
+  if (state.chStatus) params.set("status", state.chStatus);
+
+  const page = await api(`/api/channels?${params}`);
+  const rows = page.items.map(channelRow);
+  const list = $("#channel-list");
+  if (append) list.append(...rows);
+  else list.replaceChildren(...(rows.length ? rows : [emptyState("No sources yet",
+    "Sources appear here as topics are crawled. You can also add a channel, subreddit or site above.")]));
+
+  state.chOffset += page.items.length;
+  $("#ch-count").textContent = `${page.total} source${page.total === 1 ? "" : "s"}`;
+  $("#ch-more").hidden = state.chOffset >= page.total;
+}
+
+function channelRow(channel) {
+  const row = h("div", { class: `channel ${channel.status}` },
+    h("div", { class: "channel-info" },
+      h("div", { class: "meta" }, h("span", { class: "platform" }, SOURCE_LABELS[channel.platform] || channel.platform),
+        channel.manual && h("span", {}, "added by you")),
+      channel.url
+        ? h("a", { class: "channel-name", href: channel.url, target: "_blank", rel: "noopener noreferrer" }, channel.name)
+        : h("span", { class: "channel-name" }, channel.name),
+      h("div", { class: "small muted" }, channel.item_count
+        ? h("button", { class: "link-btn", onclick: () => { state.libChannel = channel; show("library"); } },
+          `${channel.item_count} item${channel.item_count === 1 ? "" : "s"} →`)
+        : "No items yet")),
+    h("div", { class: "segmented", role: "group", "aria-label": `Status of ${channel.name}` },
+      ...CHANNEL_STATUSES.map(([status, label]) => h("button", {
+        class: `${status}${channel.status === status ? " on" : ""}`, "aria-pressed": String(channel.status === status),
+        onclick: async () => {
+          if (channel.status === status) return;
+          try {
+            Object.assign(channel, await setChannelStatus(channel.id, status));
+            row.replaceWith(channelRow(channel));
+            toast({ preferred: `★ Preferring ${channel.name} — fetching its content…`, blocked: `⛔ Blocked ${channel.name}`,
+              neutral: `${channel.name} set to neutral` }[status]);
+          } catch (err) { toast(err.message); }
+        },
+      }, label))),
+    channel.manual && h("button", { class: "icon-btn", title: "Remove source", onclick: async () => {
+      if (!confirm(`Remove ${channel.name}?`)) return;
+      try { await api(`/api/channels/${channel.id}`, { method: "DELETE" }); await loadChannels(); }
+      catch (err) { toast(err.message); }
+    } }, "🗑"));
+  return row;
+}
+
+$("#channel-form").onsubmit = async (e) => {
+  e.preventDefault();
+  const value = $("#channel-value").value.trim();
+  if (!value) return;
+  const button = e.submitter; button.disabled = true;
+  try {
+    const channel = await api("/api/channels", { method: "POST", body: {
+      value, platform: $("#channel-platform").value || null, status: $("#channel-status").value } });
+    $("#channel-value").value = "";
+    toast(channel.status === "preferred" ? `Added ${channel.name} — fetching its content for your topics…` : `Added ${channel.name}`);
+    await loadChannels();
+  } catch (err) { toast(err.message); }
+  button.disabled = false;
+};
+
+let channelSearchTimer;
+$("#ch-q").oninput = () => { clearTimeout(channelSearchTimer); channelSearchTimer = setTimeout(() => loadChannels(), 250); };
+$("#ch-platform").onchange = () => loadChannels();
+$("#ch-more").onclick = () => loadChannels(true);
+document.querySelectorAll("#ch-status .chip").forEach((chip) => {
+  chip.onclick = () => {
+    document.querySelectorAll("#ch-status .chip").forEach((c) => c.classList.toggle("active", c === chip));
+    state.chStatus = chip.dataset.status;
+    loadChannels();
+  };
+});
+
 // --- library -----------------------------------------------------------------
 
 async function loadLibrary(append = false) {
@@ -321,6 +446,9 @@ async function loadLibrary(append = false) {
   if ($("#lib-q").value.trim()) params.set("q", $("#lib-q").value.trim());
   if ($("#lib-topic").value) params.set("topic_id", $("#lib-topic").value);
   if ($("#lib-type").value) params.set("content_type", $("#lib-type").value);
+  if (state.libChannel) params.set("channel_id", state.libChannel.id);
+  $("#lib-channel").hidden = !state.libChannel;
+  $("#lib-channel").textContent = state.libChannel ? `Source: ${state.libChannel.name} ✕` : "";
 
   const page = await api(`/api/content?${params}`);
   const grid = $("#lib-grid");
@@ -341,6 +469,7 @@ let searchTimer;
 $("#lib-q").oninput = () => { clearTimeout(searchTimer); searchTimer = setTimeout(() => loadLibrary(), 250); };
 ["#lib-topic", "#lib-type", "#lib-status"].forEach((sel) => { $(sel).onchange = () => loadLibrary(); });
 $("#lib-more").onclick = () => loadLibrary(true);
+$("#lib-channel").onclick = () => { state.libChannel = null; loadLibrary(); };
 
 // --- history -----------------------------------------------------------------
 
@@ -408,6 +537,7 @@ $("#prefs-form").onsubmit = async (e) => {
 const loaders = {
   feed: loadFeed,
   topics: () => Promise.all([loadTopics(), loadSources()]),
+  sources: () => loadChannels(),
   library: () => loadLibrary(),
   history: loadHistory,
   settings: loadSettings,

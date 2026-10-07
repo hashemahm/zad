@@ -7,15 +7,20 @@ from typing import Annotated
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Response, status
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import func, or_, select
+import httpx
+from sqlalchemy import case, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload
 
 from app.config import BASE_DIR, get_settings
 from app.crawlers import get_crawlers
 from app.db import get_db, init_db
-from app.models import ContentItem, Topic, ViewEvent, utcnow
+from app.models import NEUTRAL, PREFERRED, Channel, ContentItem, Topic, ViewEvent, utcnow
 from app.schemas import (
+    ChannelCreate,
+    ChannelOut,
+    ChannelPage,
+    ChannelUpdate,
     ContentDetail,
     ContentOut,
     ContentPage,
@@ -30,7 +35,8 @@ from app.schemas import (
     TopicUpdate,
 )
 from app.services.crawl import crawl_all_active, crawl_topic
-from app.services.feed import build_feed, feed_shares
+from app.services.channels import backfill_channels, detect_platform, resolve_channel, upsert_channel
+from app.services.feed import build_feed, feed_shares, not_blocked
 from app.services.preferences import get_preferences
 
 settings = get_settings()
@@ -40,6 +46,12 @@ log = logging.getLogger("microlearning")
 
 STATIC_DIR = BASE_DIR / "static"
 DbSession = Annotated[Session, Depends(get_db)]
+
+
+async def _startup() -> None:
+    await backfill_channels()
+    if settings.crawl_interval_minutes > 0:
+        await _scheduler()
 
 
 async def _scheduler() -> None:
@@ -62,12 +74,11 @@ async def _safe_crawl_all() -> None:
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     init_db()
-    task = asyncio.create_task(_scheduler()) if settings.crawl_interval_minutes > 0 else None
+    task = asyncio.create_task(_startup())
     yield
-    if task:
-        task.cancel()
-        with suppress(asyncio.CancelledError):
-            await task
+    task.cancel()
+    with suppress(asyncio.CancelledError):
+        await task
 
 
 app = FastAPI(title=settings.app_name, lifespan=lifespan)
@@ -81,6 +92,8 @@ def _content_out(item: ContentItem, detail: bool = False) -> ContentOut:
         "topic_name": item.topic.name,
         "topic_priority": item.topic.priority,
         "has_body": bool(item.body),
+        "channel_name": item.channel.name if item.channel else None,
+        "channel_status": item.channel.status if item.channel else None,
     }
     if detail:
         return ContentDetail(**data, body=item.body)
@@ -118,10 +131,30 @@ def _get_topic(db: Session, topic_id: int) -> Topic:
 
 
 def _get_item(db: Session, content_id: int) -> ContentItem:
-    item = db.get(ContentItem, content_id, options=[joinedload(ContentItem.topic)])
+    item = db.get(ContentItem, content_id, options=[joinedload(ContentItem.topic), joinedload(ContentItem.channel)])
     if item is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Content not found")
     return item
+
+
+def _get_channel(db: Session, channel_id: int) -> Channel:
+    channel = db.get(Channel, channel_id)
+    if channel is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Source not found")
+    return channel
+
+
+def _channel_out(db: Session, channel: Channel) -> ChannelOut:
+    count = db.scalar(select(func.count(ContentItem.id)).where(ContentItem.channel_id == channel.id))
+    return ChannelOut.model_validate(channel).model_copy(update={"item_count": count})
+
+
+async def _background_channel_crawl(channel_id: int) -> None:
+    try:
+        results = await crawl_all_active(channel_ids={channel_id})
+        log.info("Crawled source %s: %d new items", channel_id, sum(r.added for r in results))
+    except Exception:
+        log.exception("Crawl of source %s failed", channel_id)
 
 
 async def _background_crawl(topic_id: int) -> None:
@@ -199,6 +232,84 @@ def list_sources():
     return statuses
 
 
+# --- channels (individual sources: YouTube channels, subreddits, sites…) -------
+
+@app.get("/api/channels", response_model=ChannelPage)
+def list_channels(db: DbSession,
+                  platform: str | None = None,
+                  status_filter: str | None = Query(None, alias="status", pattern="^(neutral|preferred|blocked)$"),
+                  q: str | None = Query(None, max_length=200),
+                  limit: int = Query(50, ge=1, le=500),
+                  offset: int = Query(0, ge=0)):
+    item_count = (select(func.count(ContentItem.id)).where(ContentItem.channel_id == Channel.id)
+                  .correlate(Channel).scalar_subquery())
+    query = select(Channel, item_count.label("item_count"))
+    if platform:
+        query = query.where(Channel.platform == platform)
+    if status_filter:
+        query = query.where(Channel.status == status_filter)
+    if q:
+        like = f"%{q}%"
+        query = query.where(or_(Channel.name.ilike(like), Channel.key.ilike(like)))
+
+    total = db.scalar(select(func.count()).select_from(query.subquery()))
+    status_order = case({PREFERRED: 0, NEUTRAL: 1}, value=Channel.status, else_=2)
+    rows = db.execute(query.order_by(status_order, item_count.desc(), func.lower(Channel.name))
+                      .limit(limit).offset(offset)).all()
+    return ChannelPage(total=total, items=[
+        ChannelOut.model_validate(channel).model_copy(update={"item_count": count}) for channel, count in rows
+    ])
+
+
+@app.post("/api/channels", response_model=ChannelOut, status_code=status.HTTP_201_CREATED)
+async def add_channel(payload: ChannelCreate, db: DbSession, background: BackgroundTasks):
+    platform = payload.platform or detect_platform(payload.value)
+    if not platform:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT,
+                            "Could not tell which platform this is; choose one")
+    try:
+        async with httpx.AsyncClient(timeout=settings.http_timeout_seconds, follow_redirects=True,
+                                     headers={"User-Agent": settings.http_user_agent}) as client:
+            ref = await resolve_channel(platform, payload.value, client)
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc))
+    except httpx.HTTPError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"Could not look up the source: {exc}")
+
+    channel = db.scalar(select(Channel).where(Channel.platform == platform, Channel.key == ref.key))
+    if channel is None:
+        channel = upsert_channel(db, platform, ref)
+        channel.manual = True
+    channel.status = payload.status
+    db.commit()
+    if channel.status == PREFERRED:
+        background.add_task(_background_channel_crawl, channel.id)
+    return _channel_out(db, channel)
+
+
+@app.patch("/api/channels/{channel_id}", response_model=ChannelOut)
+def update_channel(channel_id: int, payload: ChannelUpdate, db: DbSession, background: BackgroundTasks):
+    channel = _get_channel(db, channel_id)
+    newly_preferred = payload.status == PREFERRED and channel.status != PREFERRED
+    channel.status = payload.status
+    db.commit()
+    if newly_preferred:
+        background.add_task(_background_channel_crawl, channel.id)
+    return _channel_out(db, channel)
+
+
+@app.delete("/api/channels/{channel_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_channel(channel_id: int, db: DbSession):
+    """Remove a source. One that already has items stays listed, reset to neutral."""
+    channel = _get_channel(db, channel_id)
+    if db.scalar(select(func.count(ContentItem.id)).where(ContentItem.channel_id == channel.id)):
+        channel.status, channel.manual = NEUTRAL, False
+    else:
+        db.delete(channel)
+    db.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
 # --- preferences --------------------------------------------------------------
 
 @app.get("/api/preferences", response_model=PreferencesIO)
@@ -229,15 +340,20 @@ def feed(db: DbSession,
 @app.get("/api/content", response_model=ContentPage)
 def library(db: DbSession,
             topic_id: int | None = None,
+            channel_id: int | None = None,
             content_type: ContentType | None = None,
             status_filter: str = Query("all", alias="status",
                                        pattern="^(all|unseen|viewed|bookmarked|completed|dismissed)$"),
             q: str | None = Query(None, max_length=200),
             limit: int = Query(30, ge=1, le=200),
             offset: int = Query(0, ge=0)):
-    query = select(ContentItem).options(joinedload(ContentItem.topic))
+    query = select(ContentItem).options(joinedload(ContentItem.topic), joinedload(ContentItem.channel))
     if topic_id is not None:
         query = query.where(ContentItem.topic_id == topic_id)
+    if channel_id is not None:
+        query = query.where(ContentItem.channel_id == channel_id)
+    else:
+        query = query.where(not_blocked())  # blocked sources only show up when asked for by id
     if content_type:
         query = query.where(ContentItem.content_type == content_type)
     if q:
@@ -289,7 +405,8 @@ def update_content(content_id: int, payload: ContentUpdate, db: DbSession):
 def history(db: DbSession, limit: int = Query(50, ge=1, le=500), offset: int = Query(0, ge=0)):
     events = db.scalars(
         select(ViewEvent)
-        .options(joinedload(ViewEvent.item).joinedload(ContentItem.topic))
+        .options(joinedload(ViewEvent.item).joinedload(ContentItem.topic),
+                 joinedload(ViewEvent.item).joinedload(ContentItem.channel))
         .order_by(ViewEvent.viewed_at.desc(), ViewEvent.id.desc())
         .limit(limit).offset(offset)
     ).all()

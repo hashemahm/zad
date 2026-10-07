@@ -11,6 +11,7 @@ from sqlalchemy import select
 from app.config import get_settings
 from app.crawlers import get_crawlers
 from app.crawlers.base import (
+    ChannelRef,
     CrawlContext,
     CrawledItem,
     CrawlReport,
@@ -20,7 +21,8 @@ from app.crawlers.base import (
     reading_seconds,
 )
 from app.db import SessionLocal
-from app.models import READING, ContentItem, Topic, utcnow
+from app.models import BLOCKED, PREFERRED, READING, Channel, ContentItem, Topic, utcnow
+from app.services.channels import upsert_channel
 from app.services.preferences import get_preferences
 
 log = logging.getLogger(__name__)
@@ -38,14 +40,19 @@ class CrawlResult:
     sources: list[dict] = field(default_factory=list)
 
 
-async def _run_source(crawler, client: httpx.AsyncClient, query: str, ctx: CrawlContext) -> CrawlReport:
-    report = CrawlReport(source=crawler.name)
+async def _run_source(crawler, client: httpx.AsyncClient, query: str, ctx: CrawlContext,
+                      channel: ChannelRef | None = None) -> CrawlReport:
+    """Search a whole source, or only one of its channels when `channel` is given."""
+    report = CrawlReport(source=crawler.name, channel=channel.name if channel else None)
     ready, reason = crawler.is_configured()
     if not ready:
         report.skipped = reason
         return report
     try:
-        report.items = await crawler.search(client, query, ctx)
+        if channel:
+            report.items = await crawler.search_channel(client, channel, query, ctx)
+        else:
+            report.items = await crawler.search(client, query, ctx)
         report.found = len(report.items)
         assign_relevance(report.items)
     except SourceUnavailable as exc:
@@ -101,13 +108,16 @@ def _dedupe(items: list[CrawledItem]) -> list[CrawledItem]:
     return list(seen.values())
 
 
-async def crawl_topic(topic_id: int, client: httpx.AsyncClient | None = None) -> CrawlResult:
+async def crawl_topic(topic_id: int, client: httpx.AsyncClient | None = None,
+                      channel_ids: set[int] | None = None) -> CrawlResult:
+    """Crawl every source plus the preferred channels, or only `channel_ids` when given."""
     lock = _topic_locks.setdefault(topic_id, asyncio.Lock())
     async with lock:
-        return await _crawl_topic(topic_id, client)
+        return await _crawl_topic(topic_id, client, channel_ids)
 
 
-async def _crawl_topic(topic_id: int, client: httpx.AsyncClient | None) -> CrawlResult:
+async def _crawl_topic(topic_id: int, client: httpx.AsyncClient | None,
+                       channel_ids: set[int] | None) -> CrawlResult:
     settings = get_settings()
     with SessionLocal() as db:
         topic = db.get(Topic, topic_id)
@@ -121,6 +131,16 @@ async def _crawl_topic(topic_id: int, client: httpx.AsyncClient | None) -> Crawl
             max_reading_seconds=prefs.max_reading_minutes * 60,
         )
         known_urls = set(db.scalars(select(ContentItem.url).where(ContentItem.topic_id == topic_id)))
+        blocked = {(platform, key) for platform, key in
+                   db.execute(select(Channel.platform, Channel.key).where(Channel.status == BLOCKED))}
+        if channel_ids is not None:
+            wanted = select(Channel).where(Channel.id.in_(channel_ids), Channel.status != BLOCKED)
+        elif settings.preferred_source_results > 0:
+            wanted = select(Channel).where(Channel.status == PREFERRED)
+        else:
+            wanted = None
+        channels = [(c.platform, ChannelRef(c.key, c.name, c.url))
+                    for c in (db.scalars(wanted).all() if wanted is not None else [])]
 
     result = CrawlResult(topic_id=topic_id, topic=query)
     owns_client = client is None
@@ -131,8 +151,18 @@ async def _crawl_topic(topic_id: int, client: httpx.AsyncClient | None) -> Crawl
             headers={"User-Agent": settings.http_user_agent},
         )
     try:
-        reports = await asyncio.gather(*(_run_source(c, client, query, ctx) for c in get_crawlers()))
-        items = _dedupe([item for report in reports for item in report.items])
+        crawlers = {c.name: c for c in get_crawlers()}
+        channel_ctx = CrawlContext(limit=max(1, settings.preferred_source_results),
+                                   max_video_seconds=ctx.max_video_seconds,
+                                   max_reading_seconds=ctx.max_reading_seconds)
+        runs = [] if channel_ids is not None else [_run_source(c, client, query, ctx) for c in crawlers.values()]
+        runs += [_run_source(crawlers[platform], client, query, channel_ctx, ref)
+                 for platform, ref in channels if platform in crawlers]
+        reports = await asyncio.gather(*runs)
+        items = _dedupe([
+            item for report in reports for item in report.items
+            if not (item.channel and (item.source, item.channel.key) in blocked)
+        ])
 
         if settings.estimate_reading_time:
             sem = asyncio.Semaphore(settings.max_concurrent_page_fetches)
@@ -151,13 +181,15 @@ async def _crawl_topic(topic_id: int, client: httpx.AsyncClient | None) -> Crawl
             await client.aclose()
 
     result.sources = [
-        {"source": r.source, "found": r.found, "error": r.error, "skipped": r.skipped} for r in reports
+        {"source": r.source, "found": r.found, "error": r.error, "skipped": r.skipped}
+        | ({"channel": r.channel} if r.channel else {})
+        for r in reports
     ]
-    _store(topic_id, items, result)
+    _store(topic_id, items, result, record_crawl=channel_ids is None)
     return result
 
 
-def _store(topic_id: int, items: list[CrawledItem], result: CrawlResult) -> None:
+def _store(topic_id: int, items: list[CrawledItem], result: CrawlResult, record_crawl: bool = True) -> None:
     with SessionLocal() as db:
         topic = db.get(Topic, topic_id)
         if topic is None:
@@ -166,12 +198,18 @@ def _store(topic_id: int, items: list[CrawledItem], result: CrawlResult) -> None
             row.url: row
             for row in db.scalars(select(ContentItem).where(ContentItem.topic_id == topic_id))
         }
+        channels: dict = {}
         for item in items:
+            fields = {k: v for k, v in item.__dict__.items() if k != "channel"}
+            channel = upsert_channel(db, item.source, item.channel, channels) if item.channel else None
+            if channel is not None and channel.status == BLOCKED:
+                continue  # blocked while the crawl was running
             row = existing.get(item.url)
             if row is None:
-                db.add(ContentItem(topic_id=topic_id, **item.__dict__))
+                db.add(ContentItem(topic_id=topic_id, channel=channel, **fields))
                 result.added += 1
             else:
+                row.channel = channel or row.channel
                 # Refresh source metadata but keep the learner's state (views, completed, ...).
                 row.title = item.title
                 row.popularity = item.popularity
@@ -182,14 +220,15 @@ def _store(topic_id: int, items: list[CrawledItem], result: CrawlResult) -> None
                 row.duration_seconds = item.duration_seconds or row.duration_seconds
                 result.updated += 1
 
-        topic.last_crawled_at = utcnow()
-        topic.last_crawl_summary = json.dumps(
-            {"added": result.added, "updated": result.updated, "sources": result.sources}
-        )
+        if record_crawl:  # a crawl of only some channels is not a full crawl of the topic
+            topic.last_crawled_at = utcnow()
+            topic.last_crawl_summary = json.dumps(
+                {"added": result.added, "updated": result.updated, "sources": result.sources}
+            )
         db.commit()
 
 
-async def crawl_all_active() -> list[CrawlResult]:
+async def crawl_all_active(channel_ids: set[int] | None = None) -> list[CrawlResult]:
     with SessionLocal() as db:
         topic_ids = list(
             db.scalars(select(Topic.id).where(Topic.active.is_(True)).order_by(Topic.priority, Topic.id))
@@ -197,7 +236,7 @@ async def crawl_all_active() -> list[CrawlResult]:
     results = []
     for topic_id in topic_ids:
         try:
-            results.append(await crawl_topic(topic_id))
+            results.append(await crawl_topic(topic_id, channel_ids=channel_ids))
         except LookupError:
             continue  # deleted while the crawl was running
     return results

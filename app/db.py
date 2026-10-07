@@ -1,7 +1,7 @@
 from collections.abc import Iterator
 from pathlib import Path
 
-from sqlalchemy import create_engine, event
+from sqlalchemy import create_engine, event, inspect, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
@@ -40,6 +40,19 @@ def init_db() -> None:
     from app import models  # noqa: F401  (register tables)
 
     Base.metadata.create_all(engine)
+    _add_missing_columns()
+
+
+def _add_missing_columns() -> None:
+    """create_all() does not alter existing tables, so add columns introduced since."""
+    columns = {c["name"] for c in inspect(engine).get_columns("content_items")}
+    if "channel_id" not in columns:
+        with engine.begin() as conn:
+            conn.execute(text(
+                "ALTER TABLE content_items ADD COLUMN channel_id INTEGER "
+                "REFERENCES channels(id) ON DELETE SET NULL"
+            ))
+            conn.execute(text("CREATE INDEX ix_content_items_channel_id ON content_items (channel_id)"))
 
 
 def get_db() -> Iterator[Session]:

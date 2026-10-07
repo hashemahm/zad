@@ -7,7 +7,15 @@ from collections.abc import Hashable, Sequence
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session, joinedload
 
-from app.models import READING, VIDEO, ContentItem, Preferences, Topic
+from app.models import BLOCKED, PREFERRED, READING, VIDEO, Channel, ContentItem, Preferences, Topic
+
+# Added to a preferred source's relevance (0..1), so its unseen items come before other sources'.
+PREFERRED_BOOST = 1.0
+
+
+def not_blocked():
+    """Filter for queries on ContentItem: drop items from blocked sources."""
+    return ~ContentItem.channel.has(Channel.status == BLOCKED)
 
 
 def weighted_interleave(
@@ -50,9 +58,10 @@ def eligible_items_query(prefs: Preferences, content_type: str | None = None):
     return (
         select(ContentItem)
         .join(Topic)
-        .options(joinedload(ContentItem.topic))
+        .options(joinedload(ContentItem.topic), joinedload(ContentItem.channel))
         .where(
             Topic.active.is_(True),
+            not_blocked(),
             ContentItem.content_type.in_(types),
             ContentItem.completed.is_(False),
             ContentItem.dismissed.is_(False),
@@ -62,9 +71,10 @@ def eligible_items_query(prefs: Preferences, content_type: str | None = None):
 
 
 def _rank_key(item: ContentItem):
-    # Unseen first, then the source's best results, then newest.
+    # Unseen first, then preferred sources and each source's best results, then newest.
     published = item.published_at.timestamp() if item.published_at else 0
-    return (item.view_count > 0, -item.relevance, -published)
+    boost = PREFERRED_BOOST if item.channel and item.channel.status == PREFERRED else 0.0
+    return (item.view_count > 0, -(item.relevance + boost), -published)
 
 
 def build_feed(

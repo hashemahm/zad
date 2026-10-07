@@ -13,6 +13,7 @@
     <nav class="tabs" role="tablist">
       <button class="tab active" data-view="feed">Feed</button>
       <button class="tab" data-view="topics">Topics</button>
+      <button class="tab" data-view="sources">Sources</button>
       <button class="tab" data-view="library">Library</button>
       <button class="tab" data-view="history">History</button>
       <button class="tab" data-view="settings">Settings</button>
@@ -45,11 +46,40 @@
       <div id="topic-list" class="topic-list"></div>
       <div class="panel">
         <div class="panel-head">
-          <h3>Sources</h3>
+          <h3>Platforms</h3>
           <button class="btn" id="crawl-all">↻ Re-crawl all topics</button>
         </div>
         <ul id="source-list" class="source-list"></ul>
       </div>
+    </section>
+
+    <!-- Sources (channels, subreddits, publications, sites) -->
+    <section id="view-sources" class="view">
+      <form id="channel-form" class="panel row-form">
+        <input id="channel-value" placeholder="Add a source: youtube.com/@name, r/kubernetes, name.substack.com, dev.to/name…" maxlength="500" required>
+        <select id="channel-platform" aria-label="Platform"></select>
+        <select id="channel-status" aria-label="Add as">
+          <option value="preferred">★ Prefer</option>
+          <option value="neutral">Just track</option>
+          <option value="blocked">⛔ Block</option>
+        </select>
+        <button class="btn primary" type="submit">Add source</button>
+      </form>
+      <p class="muted small">Preferred sources come first in your feed and are searched directly on every crawl.
+        Blocked sources are never stored or shown.</p>
+      <div class="toolbar wrap">
+        <input id="ch-q" type="search" placeholder="Search sources…">
+        <select id="ch-platform" aria-label="Filter by platform"></select>
+        <div class="chips" id="ch-status">
+          <button class="chip active" data-status="">All</button>
+          <button class="chip" data-status="preferred">★ Preferred</button>
+          <button class="chip" data-status="neutral">Neutral</button>
+          <button class="chip" data-status="blocked">⛔ Blocked</button>
+        </div>
+        <span class="muted" id="ch-count"></span>
+      </div>
+      <div id="channel-list" class="channel-list"></div>
+      <div class="center"><button class="btn" id="ch-more" hidden>Load more</button></div>
     </section>
 
     <!-- Library -->
@@ -70,6 +100,7 @@
           <option value="completed">Done</option>
           <option value="dismissed">Hidden</option>
         </select>
+        <button class="chip active" id="lib-channel" hidden></button>
         <span class="muted" id="lib-count"></span>
       </div>
       <div id="lib-grid" class="grid"></div>
@@ -115,6 +146,8 @@
     <div id="player-body" class="player-body"></div>
     <div class="player-actions">
       <a class="btn" id="player-open" target="_blank" rel="noopener noreferrer">Open original ↗</a>
+      <button class="btn" id="player-prefer">★ Prefer source</button>
+      <button class="btn danger" id="player-block">⛔ Block source</button>
       <span class="spacer"></span>
       <button class="btn" id="player-save">☆ Save</button>
       <button class="btn primary" id="player-done">✓ Mark done</button>

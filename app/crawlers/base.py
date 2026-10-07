@@ -14,6 +14,15 @@ log = logging.getLogger(__name__)
 
 
 @dataclass
+class ChannelRef:
+    """Where an item was published inside a platform: a YouTube channel, a subreddit, a site..."""
+
+    key: str  # stable id within the platform, e.g. a YouTube channel id or "kubernetes" for r/kubernetes
+    name: str
+    url: str | None = None
+
+
+@dataclass
 class CrawledItem:
     source: str
     content_type: str  # "video" | "reading"
@@ -28,6 +37,7 @@ class CrawledItem:
     published_at: datetime | None = None
     popularity: int = 0
     relevance: float = 0.0
+    channel: ChannelRef | None = None
 
 
 @dataclass
@@ -52,6 +62,18 @@ class Crawler(Protocol):
     async def search(
         self, client: httpx.AsyncClient, query: str, ctx: CrawlContext
     ) -> list[CrawledItem]: ...
+
+    async def search_channel(
+        self, client: httpx.AsyncClient, channel: ChannelRef, query: str, ctx: CrawlContext
+    ) -> list[CrawledItem]:
+        """Find content on `query` published by one channel (used for preferred sources)."""
+
+    async def resolve_channel(self, client: httpx.AsyncClient, text: str) -> ChannelRef:
+        """Turn what a user typed (a URL, handle or name) into a channel. Raises ValueError."""
+
+    @staticmethod
+    def channel_from_stored(url: str, author: str | None) -> ChannelRef | None:
+        """Work out the channel of an item stored before channels were tracked."""
 
 
 # --- text helpers -------------------------------------------------------------
@@ -183,6 +205,33 @@ def assign_relevance(items: list[CrawledItem]) -> None:
         items[index].relevance = 1.0 - rank / n
 
 
+def parse_url(text: str) -> httpx.URL | None:
+    """Parse a URL a user typed, adding https:// when the scheme is missing."""
+    text = text.strip()
+    if not re.match(r"^[a-z][a-z0-9+.-]*://", text, re.IGNORECASE):
+        text = "https://" + text
+    try:
+        url = httpx.URL(text)
+    except httpx.InvalidURL:
+        return None
+    return url if url.host and "." in url.host else None
+
+
+def bare_host(url: str | httpx.URL | None) -> str | None:
+    """'https://www.Example.com/x' -> 'example.com'."""
+    if not url:
+        return None
+    try:
+        host = (url if isinstance(url, httpx.URL) else httpx.URL(url)).host.lower()
+    except httpx.InvalidURL:
+        return None
+    return host.removeprefix("www.") or None
+
+
+def path_segments(url: httpx.URL) -> list[str]:
+    return [part for part in url.path.split("/") if part]
+
+
 YOUTUBE_HOSTS = ("youtube.com", "youtu.be", "m.youtube.com", "www.youtube.com")
 
 
@@ -196,6 +245,7 @@ def is_youtube_url(url: str | None) -> bool:
 @dataclass
 class CrawlReport:
     source: str
+    channel: str | None = None  # set when only one channel of the source was searched
     found: int = 0
     error: str | None = None
     skipped: str | None = None

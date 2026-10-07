@@ -8,6 +8,7 @@ from app.crawlers.devto import DevToCrawler, topic_to_tag
 from app.crawlers.hackernews import HackerNewsCrawler
 from app.crawlers.medium import MediumCrawler, topic_to_slug
 from app.crawlers.reddit import RedditCrawler
+from app.crawlers.substack import SubstackCrawler
 from app.crawlers.youtube import YouTubeCrawler
 
 CTX = CrawlContext(limit=10, max_video_seconds=600, max_reading_seconds=480)
@@ -124,6 +125,63 @@ def test_reddit_uses_oauth_and_filters_posts():
     assert [i.external_id for i in items] == ["self", "link"]
     assert items[0].body == "<p>hello</p>" and items[0].duration_seconds == 120
     assert items[1].url == "https://blog.example/k8s"
+
+
+def _substack_post(pid, words=500, audience="everyone", kind="newsletter"):
+    return {
+        "type": "post",
+        "context": {"users": [{"name": "Writer"}]},
+        "publication": {"name": "Ops Weekly"},
+        "post": {"id": pid, "type": kind, "audience": audience, "title": f" Kubernetes post {pid} ", "wordcount": words,
+                 "canonical_url": f"https://ops.substack.com/p/{pid}", "subtitle": "Sub", "reaction_count": 10,
+                 "restacks": 2, "post_date": "2026-05-12T12:22:04.658Z", "cover_image": "https://cdn/c.png"},
+    }
+
+
+def test_substack_skips_paid_long_and_non_posts_and_follows_cursor():
+    pages = []
+
+    def handler(request):
+        pages.append(request.url.params.get("cursor"))
+        if "cursor" not in request.url.params:
+            return httpx.Response(200, json={"nextCursor": "c1", "items": [
+                {"type": "profileSearchResults", "results": []},
+                _substack_post(1),
+                _substack_post(2, audience="only_paid"),
+                _substack_post(3, words=5000),  # ~22 min > 8 min limit
+                _substack_post(4, kind="podcast"),
+                {"type": "comment", "post": {}},
+            ]})
+        off_topic = _substack_post(6)
+        off_topic["post"]["title"], off_topic["post"]["subtitle"] = "Weekly trade recap", "Markets"
+        return httpx.Response(200, json={"nextCursor": None, "items": [_substack_post(1), _substack_post(5, words=100), off_topic]})
+
+    crawler = SubstackCrawler(SETTINGS)
+    crawler.page_delay = 0
+    items = run(crawler, handler)
+    assert pages == [None, "c1"]
+    assert [i.external_id for i in items] == ["1", "5"]
+    first = items[0]
+    assert first.url == "https://ops.substack.com/p/1" and first.title == "Kubernetes post 1"
+    assert first.author == "Writer · Ops Weekly" and first.duration_seconds == 180
+    assert first.popularity == 12 and first.content_type == "reading"
+
+
+def test_substack_keeps_first_page_when_rate_limited():
+    def handler(request):
+        if "cursor" in request.url.params:
+            return httpx.Response(429)
+        return httpx.Response(200, json={"nextCursor": "c1", "items": [_substack_post(1)]})
+
+    crawler = SubstackCrawler(SETTINGS)
+    crawler.page_delay = 0
+    assert [i.external_id for i in run(crawler, handler)] == ["1"]
+
+
+def test_substack_can_include_paid_posts():
+    crawler = SubstackCrawler(Settings(_env_file=None, substack_include_paid=True))
+    items = crawler.parse({"items": [_substack_post(2, audience="only_paid")]}, CTX)
+    assert [i.external_id for i in items] == ["2"]
 
 
 def test_slug_helpers():
